@@ -1,9 +1,14 @@
-# LangChain Core
-langchain
+# LangChain Ecosystem
+langchain                
+langchain-community
 langchain-core
-langchain_community
-langchain-chroma
+langchain-google-genai  
+langchain-chroma         
+langchain-text-splitters
 
+python-dotenv
+pypdf                    
+chromadb
 # OpenAI Integration
 langchain-openai
 openai
@@ -27,8 +32,5 @@ python-dotenv
 numpy
 scikit-learn
 
-#Pytorch  --If asked to install when run the open source model from huggingface. 
-torch
-torchvision
-torchaudio
+
 streamlit
