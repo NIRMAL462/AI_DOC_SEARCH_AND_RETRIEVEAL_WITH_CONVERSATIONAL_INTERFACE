@@ -1,0 +1,33 @@
+# LangChain Core
+langchain
+langchain-core
+langchain_community
+
+# OpenAI Integration
+langchain-openai
+openai
+
+# Anthropic Integration
+langchain-anthropic
+
+# Google Gemini (PaLM) Integration
+langchain-google-genai
+google-generativeai
+
+# Hugging Face Integration
+langchain-huggingface
+transformers
+huggingface-hub
+sentence-transformers
+# Environment Variable Management
+python-dotenv
+
+# Machine Learning Utilities
+numpy
+scikit-learn
+
+#Pytorch  --If asked to install when run the open source model from huggingface. 
+torch
+torchvision
+torchaudio
+streamlit
