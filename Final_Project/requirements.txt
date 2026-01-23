@@ -1,36 +1,11 @@
-# LangChain Ecosystem
-langchain                
+streamlit
+langchain
 langchain-community
 langchain-core
-langchain-google-genai  
-langchain-chroma         
-langchain-text-splitters
-
-python-dotenv
-pypdf                    
-chromadb
-# OpenAI Integration
-langchain-openai
-openai
-
-# Anthropic Integration
-langchain-anthropic
-
-# Google Gemini (PaLM) Integration
 langchain-google-genai
-google-generativeai
-
-# Hugging Face Integration
+langchain-chroma
+langchain-text-splitters
 langchain-huggingface
-transformers
-huggingface-hub
-sentence-transformers
-# Environment Variable Management
 python-dotenv
-
-# Machine Learning Utilities
-numpy
-scikit-learn
-
-
-streamlit
+pypdf
+chromadb

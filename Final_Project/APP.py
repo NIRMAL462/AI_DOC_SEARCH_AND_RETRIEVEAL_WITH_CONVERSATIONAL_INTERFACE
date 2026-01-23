@@ -10,7 +10,6 @@ from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain.memory import ConversationSummaryBufferMemory
 import os
 
 # --- Constants ---
@@ -49,8 +48,7 @@ with st.sidebar:
 if "processed_urls" not in st.session_state:
     st.session_state.processed_urls = set()
 
-if "processed_data" not in st.session_state:
-    st.session_state.processed_data=set()
+
 
 if selected == "WEB-URL" and url:
     if url in st.session_state.processed_urls:
@@ -61,8 +59,9 @@ if selected == "WEB-URL" and url:
 
 # --- Helper Functions ---
 def path_creator(uploaded_files):
+    temp_path=[]
     if not uploaded_files:
-        temp_path=[]
+        return []
 
         return []
     for file in uploaded_files:
@@ -228,14 +227,7 @@ parser = StrOutputParser()
 chain = prompt_template | llm | parser
 
 # --- Chat Interface ---
-if "memory" not in st.session_state:
-    # We use the LLM to summarize older messages
-    st.session_state.memory = ConversationSummaryBufferMemory(
-        llm=llm,
-        max_token_limit=1000,  
-        memory_key="history",
-        return_messages=False  
-    )
+
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
