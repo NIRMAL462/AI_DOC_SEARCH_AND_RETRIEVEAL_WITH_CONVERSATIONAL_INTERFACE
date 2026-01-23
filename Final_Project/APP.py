@@ -10,6 +10,7 @@ from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain.memory import ConversationSummaryBufferMemory
 import os
 
 # --- Constants ---
@@ -198,14 +199,17 @@ elif chunks:
 # --- Chat Chain Setup ---
 
 prompt_template = PromptTemplate(
-    input_variables=["context", "question"],
+    input_variables=["history","context", "question"],
     template="""You are a helpful assistant.
     
     Instruction: 
-    1. First, search the "Context" below for the answer.
+    1. First, search the "Context" below for the answer.Use the "Chat History" and "Context" to answer the "Question".
     2. Use the context to provide detailed answer to the user.
     3. If the answer is NOT in the Context, you must answer the user's "Question" using your own general knowledge, but you must start the response with "From the Internet:".
     4. Ensure your answer is directly relevant to the specific "Question" asked.
+    
+    Chat History (Summary):
+    {history}
 
     Context:
     {context}
@@ -218,12 +222,20 @@ prompt_template = PromptTemplate(
 
 # Note: Ensure "gemini-2.5-flash" is a valid model name for your API key. 
 # Usually, it is "gemini-1.5-flash" or "gemini-pro".
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0) 
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0) 
 
 parser = StrOutputParser()
 chain = prompt_template | llm | parser
 
 # --- Chat Interface ---
+if "memory" not in st.session_state:
+    # We use the LLM to summarize older messages
+    st.session_state.memory = ConversationSummaryBufferMemory(
+        llm=llm,
+        max_token_limit=1000,  
+        memory_key="history",
+        return_messages=False  
+    )
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -241,7 +253,8 @@ if query:
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
-
+    memory_variables = st.session_state.memory.load_memory_variables({})
+    history_text = memory_variables['history']
     # Retrieve context
     retriever = store.as_retriever(search_type="mmr", search_kwargs={"k": 3, "lambda_mult": 0.8})
     contexts = retriever.invoke(query)
@@ -251,8 +264,8 @@ if query:
     
     # Generate Answer
     with st.spinner("Thinking..."):
-        response = chain.invoke({"context": context_text, "question": query})
-
+        response = chain.invoke({"history": history_text,"context": context_text, "question": query})
+    st.session_state.memory.save_context({"input": query}, {"output": response})
     # Display and Save Assistant Response
     with st.chat_message("assistant"):
         st.markdown(response)
