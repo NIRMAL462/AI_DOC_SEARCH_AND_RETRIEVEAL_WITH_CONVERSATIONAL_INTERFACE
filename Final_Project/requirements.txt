@@ -2,6 +2,7 @@
 langchain
 langchain-core
 langchain_community
+langchain-chroma
 
 # OpenAI Integration
 langchain-openai
