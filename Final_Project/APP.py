@@ -5,15 +5,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from PIL import Image
 import io
+import fitz  # Added for PDF extraction (text, tables, images)
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.document_loaders import (PyPDFLoader, TextLoader, CSVLoader, WebBaseLoader, DirectoryLoader, Docx2txtLoader, UnstructuredPDFLoader)
+from langchain_community.document_loaders import (PyPDFLoader, TextLoader, CSVLoader, WebBaseLoader, DirectoryLoader, Docx2txtLoader)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document  # Added for creating documents
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
 # -------------------- CONSTANTS --------------------
@@ -81,7 +83,7 @@ def create_temp_paths(files):
         file_data.append((tmp.name, file.name))
     return file_data
 
-# Load BLIP model once (for describing images)
+# Load BLIP model once (for describing images/graphs)
 @st.cache_resource
 def load_blip_model():
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -98,32 +100,62 @@ def describe_image(image_bytes, processor, model):
     except Exception as e:
         return f"Could not describe image: {str(e)}"
 
+# Updated load_files to use PyMuPDF for PDFs (extracts text, tables, images/graphs)
 def load_files(file_data):
     docs = []
-    processor, model = load_blip_model()  # Load BLIP for image descriptions
+    processor, model = load_blip_model()  # BLIP for image/graph descriptions
     for path, original_name in file_data:
         suffix = Path(path).suffix.lower()
-        loader = None
         try:
             if suffix == ".pdf":
-                loader = UnstructuredPDFLoader(path, mode="elements")  # Use UnstructuredPDFLoader for PDFs
+                pdf_doc = fitz.open(path)
+                for page_num in range(len(pdf_doc)):
+                    page = pdf_doc[page_num]
+                    
+                    # Extract text
+                    text = page.get_text()
+                    
+                    # Extract tables (as text blocks)
+                    tables_text = ""
+                    tabs = page.find_tables()  # Finds tables on the page
+                    for tab in tabs:
+                        tables_text += "\n\nTable:\n" + tab.to_pandas().to_string()  # Convert to readable text
+                    
+                    # Extract images/graphs
+                    images_descriptions = ""
+                    images = page.get_images(full=True)
+                    for img_index, img in enumerate(images):
+                        xref = img[0]
+                        base_image = pdf_doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        description = describe_image(image_bytes, processor, model)
+                        images_descriptions += f"\n\n{description}"
+                    
+                    # Combine into page content
+                    page_content = text + tables_text + images_descriptions
+                    
+                    # Create LangChain document
+                    doc = Document(
+                        page_content=page_content,
+                        metadata={"source": original_name, "page": page_num + 1}
+                    )
+                    docs.append(doc)
+                
+                pdf_doc.close()
+            
             elif suffix == ".txt":
                 loader = TextLoader(path, encoding="utf-8")
+                docs.extend(loader.load())
             elif suffix == ".csv":
                 loader = CSVLoader(path)
+                docs.extend(loader.load())
             elif suffix == ".docx":
                 loader = Docx2txtLoader(path)
-            if loader:
-                temp_docs = loader.load()
-                for d in temp_docs:
-                    d.metadata["source"] = original_name
-                    # If the document has image data (from Unstructured), describe it
-                    if hasattr(d, 'image') and d.image:
-                        description = describe_image(d.image, processor, model)
-                        d.page_content += f"\n\n{description}"
-                docs.extend(temp_docs)
+                docs.extend(loader.load())
+        
         except Exception as e:
             st.error(f"Error loading {original_name}: {e}")
+    
     return docs
 
 def load_directory(dir_path):

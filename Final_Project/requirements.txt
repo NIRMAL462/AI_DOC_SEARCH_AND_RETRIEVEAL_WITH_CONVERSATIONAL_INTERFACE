@@ -6,8 +6,9 @@ langchain-huggingface
 langchain-community
 langchain-chroma
 langchain-text-splitters
-unstructured[pdf]
 transformers
 torch
-pypdf
+pypdf  
 chromadb
+pillow
+PyMuPDF  # For comprehensive PDF extraction
