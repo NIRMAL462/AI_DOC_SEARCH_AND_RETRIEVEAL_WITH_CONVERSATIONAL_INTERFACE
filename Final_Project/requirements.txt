@@ -9,3 +9,4 @@ pypdf
 chromadb
 langchain
 nest_asyncio
+llama-parse
