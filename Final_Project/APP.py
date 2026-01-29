@@ -3,28 +3,25 @@ import os
 import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
+from PIL import Image
+import io
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.document_loaders import (PyPDFLoader,TextLoader,CSVLoader, WebBaseLoader,DirectoryLoader,Docx2txtLoader)
+from langchain_community.document_loaders import (PyPDFLoader, TextLoader, CSVLoader, WebBaseLoader, DirectoryLoader, Docx2txtLoader, UnstructuredPDFLoader)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-import nest_asyncio
-from llama_parse import LlamaParse
-from langchain_core.documents import Document
+from transformers import BlipProcessor, BlipForConditionalGeneration
 
-nest_asyncio.apply()
 # -------------------- CONSTANTS --------------------
 VECTOR_DB_DIR = "vector_db"
 COLLECTION_DOCS = "docs_collection"
 COLLECTION_WEB = "web_collection"
 
-
 # -------------------- INIT --------------------
-
 load_dotenv()
 
 st.set_page_config(
@@ -36,8 +33,6 @@ st.set_page_config(
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 
-
-
 st.title("The Alternate Brain")
 st.caption("Your Private AI Friend")
 st.info("Upload documents or a URL and ask questions based on the content.")
@@ -45,13 +40,10 @@ st.info("Upload documents or a URL and ask questions based on the content.")
 with st.chat_message("assistant"):
     st.markdown("Welcome! How can I help you?")
 
-
 # -------------------- SIDEBAR --------------------
 uploaded_files = None
 url = None
 dir_path = None
-
-
 
 with st.sidebar:
     st.header("Upload Here ↓")
@@ -59,13 +51,11 @@ with st.sidebar:
         "Select input type:",
         [".PDF/CSV/TXT/DOCX", "Directory", "WEB-URL"]
     )
-  
-
 
     if selected == ".PDF/CSV/TXT/DOCX":
         uploaded_files = st.file_uploader(
             "Upload files",
-            type=["pdf", "csv", "txt","docx"],
+            type=["pdf", "csv", "txt", "docx"],
             accept_multiple_files=True,
         )
 
@@ -74,15 +64,13 @@ with st.sidebar:
 
     elif selected == "WEB-URL":
         url = st.text_input("Enter website URL")
-    # Place this inside `with st.sidebar:`
-    
+
     if st.button("🗑️ Reset Brain / Clear History"):
         st.session_state.messages = []
-        st.session_state.processed_files = set()          
-        st.rerun() # Refreshes the app
- 
+        st.session_state.processed_files = set()
+        st.rerun()  # Refreshes the app
 
-# -------------------- HELPERS -------------------
+# -------------------- HELPERS --------------------
 def create_temp_paths(files):
     file_data = []
     for file in files:
@@ -93,47 +81,50 @@ def create_temp_paths(files):
         file_data.append((tmp.name, file.name))
     return file_data
 
+# Load BLIP model once (for describing images)
+@st.cache_resource
+def load_blip_model():
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    return processor, model
+
+def describe_image(image_bytes, processor, model):
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        inputs = processor(image, return_tensors="pt")
+        out = model.generate(**inputs)
+        description = processor.decode(out[0], skip_special_tokens=True)
+        return f"Image description: {description}"
+    except Exception as e:
+        return f"Could not describe image: {str(e)}"
 
 def load_files(file_data):
     docs = []
-    for path,original_name in file_data:
+    processor, model = load_blip_model()  # Load BLIP for image descriptions
+    for path, original_name in file_data:
         suffix = Path(path).suffix.lower()
         loader = None
         try:
             if suffix == ".pdf":
-                parser = LlamaParse(
-                    result_type="markdown",
-                    verbose=True,
-                    language="en",
-                    system_prompt="Extract all text. If you see a graph, chart, or image, describe it in detail textually."
-                )
-                llama_docs = parser.load_data(path)
-                for doc in llama_docs:
-                    docs.append(Document(
-                        page_content=doc.text,
-                        metadata={"source": original_name}
-                    ))
-
-            else:
-                if suffix == ".txt":
-                    loader = TextLoader(path, encoding="utf-8")
-                elif suffix == ".csv":
-                    loader = CSVLoader(path)
-                elif suffix == ".docx":
-                    loader = Docx2txtLoader(path)
+                loader = UnstructuredPDFLoader(path, mode="elements")  # Use UnstructuredPDFLoader for PDFs
+            elif suffix == ".txt":
+                loader = TextLoader(path, encoding="utf-8")
+            elif suffix == ".csv":
+                loader = CSVLoader(path)
+            elif suffix == ".docx":
+                loader = Docx2txtLoader(path)
             if loader:
                 temp_docs = loader.load()
                 for d in temp_docs:
-                    d.metadata["source"] = original_name # <--- Fix for other files
-                docs.extend(temp_docs)            
-            else:
-                continue
-
+                    d.metadata["source"] = original_name
+                    # If the document has image data (from Unstructured), describe it
+                    if hasattr(d, 'image') and d.image:
+                        description = describe_image(d.image, processor, model)
+                        d.page_content += f"\n\n{description}"
+                docs.extend(temp_docs)
         except Exception as e:
             st.error(f"Error loading {original_name}: {e}")
-            
     return docs
-
 
 def load_directory(dir_path):
     pdf = DirectoryLoader(dir_path, glob="**/*.pdf", loader_cls=PyPDFLoader)
@@ -144,61 +135,50 @@ def load_directory(dir_path):
     csv = DirectoryLoader(dir_path, glob="**/*.csv", loader_cls=CSVLoader)
     return pdf.load() + txt.load() + csv.load()
 
-
-import time # <--- Make sure to import this at the top if missing
+import time
 
 def get_embeddings():
-    
     return HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-   
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
 def get_vector_store(chunks, collection_name):
     embeddings = get_embeddings()
-
     store = Chroma(
         persist_directory=VECTOR_DB_DIR,
         collection_name=collection_name,
         embedding_function=embeddings,
     )
-    if chunks: 
-        batch_size = 20  
+    if chunks:
+        batch_size = 20
         total_chunks = len(chunks)
         
         progress_text = "⏳ Embedding documents... Please wait."
         my_bar = st.sidebar.progress(0, text=progress_text)
         
         for i in range(0, total_chunks, batch_size):
-            batch = chunks[i : i + batch_size]
+            batch = chunks[i: i + batch_size]
             try:
                 store.add_documents(batch)
             except Exception as e:
                 if "429" in str(e):
-                    
-                    time.sleep(20) 
-                    store.add_documents(batch) 
+                    time.sleep(20)
+                    store.add_documents(batch)
                 else:
-                    raise e 
+                    raise e
             progress = min((i + batch_size) / total_chunks, 1.0)
             my_bar.progress(progress, text=f"⏳ Embedded {int(progress*100)}% of data...")
-            
             time.sleep(2)
         my_bar.empty()
         st.toast(f"✅ Successfully added {total_chunks} chunks!")
-
     return store
+
 def format_chat_history(messages, max_turns=6):
-    """
-    Convert chat history into a single string.
-    Keeps last N turns only (token safe).
-    """
     history = []
     for msg in messages[-max_turns * 2:]:
         role = "User" if msg["role"] == "user" else "Assistant"
         history.append(f"{role}: {msg['content']}")
     return "\n".join(history)
-
 
 # -------------------- LOAD DATA --------------------
 documents = []
@@ -210,21 +190,16 @@ if selected == ".PDF/CSV/TXT/DOCX" and uploaded_files:
             docs = load_files([(path, original_name)])
             documents.extend(docs)
             st.session_state.processed_files.add(original_name)
-        
-        os.remove(path)  
+        os.remove(path)
 elif selected == "Directory" and dir_path and os.path.isdir(dir_path):
-    st.session_state.processed = False
     documents = load_directory(dir_path)
-
-elif selected == "WEB" and url:
-    st.session_state.processed = False
+elif selected == "WEB-URL" and url:
     documents = WebBaseLoader([url]).load()
 
 with st.sidebar:
     if not documents and not os.path.exists(VECTOR_DB_DIR):
         st.info("Please upload documents or provide a URL.")
         st.stop()
-
 
 # -------------------- SPLIT + STORE --------------------
 splitter = RecursiveCharacterTextSplitter(
@@ -236,7 +211,6 @@ chunks = splitter.split_documents(documents) if documents else []
 
 collection = COLLECTION_WEB if selected == "WEB-URL" else COLLECTION_DOCS
 store = get_vector_store(chunks, collection)
-
 
 # -------------------- LLM + PROMPT --------------------
 prompt = PromptTemplate(
@@ -260,14 +234,12 @@ Answer:
 """,
 )
 
-
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
 )
 
 chain = prompt | llm | StrOutputParser()
-
 
 # -------------------- CHAT --------------------
 if "messages" not in st.session_state:
@@ -276,12 +248,13 @@ if "messages" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+
 st.markdown(
     """
     <style>
     /* Target the chat input container */
     div[data-testid="stChatInput"] {
-        border: 2px solid cyan !important; /* Green Border */
+        border: 2px solid cyan !important;
         border-radius: 10px;
         background-color: #2E2E2E;
         padding: 5px;
@@ -290,6 +263,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 query = st.chat_input("Ask a question about your documents")
 
 if query:
@@ -301,16 +275,16 @@ if query:
         st.markdown(query)
 
     retriever = store.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 3})
-
+        search_type="similarity",
+        search_kwargs={"k": 3}
+    )
 
     docs = retriever.invoke(query)
     context = "\n\n".join(d.page_content for d in docs)
 
     with st.spinner("Thinking..."):
         answer = chain.invoke(
-            {"context": context,"chat_history": chat_history,"question": query,}
+            {"context": context, "chat_history": chat_history, "question": query}
         )
 
     with st.chat_message("assistant"):
@@ -319,11 +293,9 @@ if query:
         
         with st.expander(f"📚 References ({len(unique_sources)} files used)"):
             for source in unique_sources:
-                    # Clean up the path to show just the filename
-                filename = Path(source).name 
+                filename = Path(source).name
                 st.write(f"📄 **{filename}**")
 
     st.session_state.messages.append(
         {"role": "assistant", "content": answer}
     )
-

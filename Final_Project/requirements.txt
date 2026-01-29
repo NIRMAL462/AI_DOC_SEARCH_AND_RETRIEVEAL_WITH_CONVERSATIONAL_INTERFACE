@@ -1,12 +1,13 @@
 streamlit
+python-dotenv
+langchain
 langchain-google-genai
 langchain-huggingface
 langchain-community
 langchain-chroma
 langchain-text-splitters
-python-dotenv
+unstructured[pdf]
+transformers
+torch
 pypdf
 chromadb
-langchain
-nest_asyncio
-llama-parse
