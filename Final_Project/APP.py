@@ -6,13 +6,17 @@ from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
-from langchain_community.document_loaders import (PyPDFLoader,TextLoader,CSVLoader, WebBaseLoader,DirectoryLoader)
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.document_loaders import (PyPDFLoader,TextLoader,CSVLoader, WebBaseLoader,DirectoryLoader,Docx2txtLoader)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+import nest_asyncio
+from llama_parse import LlamaParse
+from langchain_core.documents import Document
 
-
+nest_asyncio.apply()
 # -------------------- CONSTANTS --------------------
 VECTOR_DB_DIR = "vector_db"
 COLLECTION_DOCS = "docs_collection"
@@ -20,6 +24,7 @@ COLLECTION_WEB = "web_collection"
 
 
 # -------------------- INIT --------------------
+
 load_dotenv()
 
 st.set_page_config(
@@ -28,6 +33,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
+
+
 
 st.title("The Alternate Brain")
 st.caption("Your Private AI Friend")
@@ -42,17 +51,21 @@ uploaded_files = None
 url = None
 dir_path = None
 
+
+
 with st.sidebar:
     st.header("Upload Here ↓")
     selected = st.radio(
         "Select input type:",
-        [".PDF / CSV / TXT", "Directory", "WEB-URL"]
+        [".PDF/CSV/TXT/DOCX", "Directory", "WEB-URL"]
     )
+  
 
-    if selected == ".PDF / CSV / TXT":
+
+    if selected == ".PDF/CSV/TXT/DOCX":
         uploaded_files = st.file_uploader(
             "Upload files",
-            type=["pdf", "csv", "txt"],
+            type=["pdf", "csv", "txt","docx"],
             accept_multiple_files=True,
         )
 
@@ -61,33 +74,64 @@ with st.sidebar:
 
     elif selected == "WEB-URL":
         url = st.text_input("Enter website URL")
+    # Place this inside `with st.sidebar:`
+    
+    if st.button("🗑️ Reset Brain / Clear History"):
+        st.session_state.messages = []
+        st.session_state.processed_files = set()          
+        st.rerun() # Refreshes the app
+ 
 
-
-# -------------------- HELPERS --------------------
+# -------------------- HELPERS -------------------
 def create_temp_paths(files):
-    paths = []
+    file_data = []
     for file in files:
         with tempfile.NamedTemporaryFile(
             delete=False, suffix=Path(file.name).suffix
         ) as tmp:
             tmp.write(file.getbuffer())
-            paths.append(tmp.name)
-    return paths
+        file_data.append((tmp.name, file.name))
+    return file_data
 
 
-def load_files(paths):
+def load_files(file_data):
     docs = []
-    for path in paths:
+    for path,original_name in file_data:
         suffix = Path(path).suffix.lower()
-        if suffix == ".pdf":
-            loader = PyPDFLoader(path)
-        elif suffix == ".txt":
-            loader = TextLoader(path, encoding="utf-8")
-        elif suffix == ".csv":
-            loader = CSVLoader(path)
-        else:
-            continue
-        docs.extend(loader.load())
+        loader = None
+        try:
+            if suffix == ".pdf":
+                parser = LlamaParse(
+                    result_type="markdown",
+                    verbose=True,
+                    language="en",
+                    system_prompt="Extract all text. If you see a graph, chart, or image, describe it in detail textually."
+                )
+                llama_docs = parser.load_data(path)
+                for doc in llama_docs:
+                    docs.append(Document(
+                        page_content=doc.text,
+                        metadata={"source": original_name}
+                    ))
+
+            else:
+                if suffix == ".txt":
+                    loader = TextLoader(path, encoding="utf-8")
+                elif suffix == ".csv":
+                    loader = CSVLoader(path)
+                elif suffix == ".docx":
+                    loader = Docx2txtLoader(path)
+            if loader:
+                temp_docs = loader.load()
+                for d in temp_docs:
+                    d.metadata["source"] = original_name # <--- Fix for other files
+                docs.extend(temp_docs)            
+            else:
+                continue
+
+        except Exception as e:
+            st.error(f"Error loading {original_name}: {e}")
+            
     return docs
 
 
@@ -101,42 +145,85 @@ def load_directory(dir_path):
     return pdf.load() + txt.load() + csv.load()
 
 
+import time # <--- Make sure to import this at the top if missing
+
+def get_embeddings():
+    
+    return HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+   
+
 def get_vector_store(chunks, collection_name):
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="gemini-embedding-001"
-    )
+    embeddings = get_embeddings()
 
     store = Chroma(
         persist_directory=VECTOR_DB_DIR,
         collection_name=collection_name,
         embedding_function=embeddings,
     )
-
-    if chunks:
-        store.add_documents(chunks)
-        st.toast(f"Added {len(chunks)} chunks")
+    if chunks: 
+        batch_size = 20  
+        total_chunks = len(chunks)
+        
+        progress_text = "⏳ Embedding documents... Please wait."
+        my_bar = st.sidebar.progress(0, text=progress_text)
+        
+        for i in range(0, total_chunks, batch_size):
+            batch = chunks[i : i + batch_size]
+            try:
+                store.add_documents(batch)
+            except Exception as e:
+                if "429" in str(e):
+                    
+                    time.sleep(20) 
+                    store.add_documents(batch) 
+                else:
+                    raise e 
+            progress = min((i + batch_size) / total_chunks, 1.0)
+            my_bar.progress(progress, text=f"⏳ Embedded {int(progress*100)}% of data...")
+            
+            time.sleep(2)
+        my_bar.empty()
+        st.toast(f"✅ Successfully added {total_chunks} chunks!")
 
     return store
+def format_chat_history(messages, max_turns=6):
+    """
+    Convert chat history into a single string.
+    Keeps last N turns only (token safe).
+    """
+    history = []
+    for msg in messages[-max_turns * 2:]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history.append(f"{role}: {msg['content']}")
+    return "\n".join(history)
 
 
 # -------------------- LOAD DATA --------------------
 documents = []
 
-if selected == ".PDF / CSV / TXT" and uploaded_files:
-    paths = create_temp_paths(uploaded_files)
-    documents = load_files(paths)
-    for p in paths:
-        os.remove(p)
-
+if selected == ".PDF/CSV/TXT/DOCX" and uploaded_files:
+    file_data = create_temp_paths(uploaded_files)
+    for path, original_name in file_data:
+        if original_name not in st.session_state.processed_files:
+            docs = load_files([(path, original_name)])
+            documents.extend(docs)
+            st.session_state.processed_files.add(original_name)
+        
+        os.remove(path)  
 elif selected == "Directory" and dir_path and os.path.isdir(dir_path):
+    st.session_state.processed = False
     documents = load_directory(dir_path)
 
-elif selected == "WEB-URL" and url:
+elif selected == "WEB" and url:
+    st.session_state.processed = False
     documents = WebBaseLoader([url]).load()
 
-if not documents and not os.path.exists(VECTOR_DB_DIR):
-    st.info("Please upload documents or provide a URL.")
-    st.stop()
+with st.sidebar:
+    if not documents and not os.path.exists(VECTOR_DB_DIR):
+        st.info("Please upload documents or provide a URL.")
+        st.stop()
 
 
 # -------------------- SPLIT + STORE --------------------
@@ -153,13 +240,15 @@ store = get_vector_store(chunks, collection)
 
 # -------------------- LLM + PROMPT --------------------
 prompt = PromptTemplate(
-    input_variables=["context", "question"],
+    input_variables=["context", "chat_history", "question"],
     template="""
 You are a helpful assistant.
 
-Use the Context below to answer the Question.
-If the answer is not in the Context, answer from general knowledge
-and start with "From the Internet:".
+Use the chat history ONLY for conversational continuity.
+Use the document context as the source of truth.
+
+Chat History:
+{chat_history}
 
 Context:
 {context}
@@ -170,6 +259,7 @@ Question:
 Answer:
 """,
 )
+
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
@@ -186,32 +276,54 @@ if "messages" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-
+st.markdown(
+    """
+    <style>
+    /* Target the chat input container */
+    div[data-testid="stChatInput"] {
+        border: 2px solid cyan !important; /* Green Border */
+        border-radius: 10px;
+        background-color: #2E2E2E;
+        padding: 5px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 query = st.chat_input("Ask a question about your documents")
 
 if query:
     st.session_state.messages.append(
         {"role": "user", "content": query}
     )
+    chat_history = format_chat_history(st.session_state.messages)
     with st.chat_message("user"):
         st.markdown(query)
 
     retriever = store.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 3, "lambda_mult": 0.8},
-    )
+    search_type="similarity",
+    search_kwargs={"k": 3})
+
 
     docs = retriever.invoke(query)
     context = "\n\n".join(d.page_content for d in docs)
 
     with st.spinner("Thinking..."):
         answer = chain.invoke(
-            {"context": context, "question": query}
+            {"context": context,"chat_history": chat_history,"question": query,}
         )
 
     with st.chat_message("assistant"):
         st.markdown(answer)
+        unique_sources = {doc.metadata.get('source', 'Unknown') for doc in docs}
+        
+        with st.expander(f"📚 References ({len(unique_sources)} files used)"):
+            for source in unique_sources:
+                    # Clean up the path to show just the filename
+                filename = Path(source).name 
+                st.write(f"📄 **{filename}**")
 
     st.session_state.messages.append(
         {"role": "assistant", "content": answer}
     )
+
