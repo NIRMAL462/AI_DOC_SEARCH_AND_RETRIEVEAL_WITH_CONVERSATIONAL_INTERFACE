@@ -3,6 +3,7 @@ python-dotenv
 langchain
 langchain-google-genai
 langchain-huggingface
+sentence-transformers 
 langchain-community
 langchain-chroma
 langchain-text-splitters
